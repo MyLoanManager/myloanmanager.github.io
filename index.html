@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Loan Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <section class="hero">
+    <div class="brand-row"><span class="logo">₹</span><span>My Loan Manager</span></div>
+    <svg viewBox="0 0 480 330" class="hero-svg" role="img" aria-label="Loans and growth illustration">
+      <defs>
+        <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe08a"/><stop offset="1" stop-color="#f0a30a"/></linearGradient>
+        <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity=".95"/><stop offset="1" stop-color="#bcd0ff" stop-opacity=".8"/></linearGradient>
+      </defs>
+      <circle cx="240" cy="160" r="150" fill="#fff" opacity=".07"/>
+      <circle cx="240" cy="160" r="105" fill="#fff" opacity=".08"/>
+      <g fill="url(#bar)">
+        <rect x="50" y="205" width="40" height="85" rx="7"/>
+        <rect x="102" y="170" width="40" height="120" rx="7"/>
+        <rect x="154" y="135" width="40" height="155" rx="7"/>
+        <rect x="206" y="95" width="40" height="195" rx="7"/>
+      </g>
+      <polyline points="70,190 122,152 174,118 226,72 282,40" fill="none" stroke="#ffd86b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="282" cy="40" r="9" fill="#ffd86b"/>
+      <g>
+        <g id="coinstack">
+          <ellipse cx="350" cy="294" rx="42" ry="12" fill="#c98206"/><rect x="308" y="282" width="84" height="12" fill="#d98a07"/><ellipse cx="350" cy="282" rx="42" ry="12" fill="url(#gold)"/>
+          <ellipse cx="350" cy="280" rx="42" ry="12" fill="#c98206"/><rect x="308" y="268" width="84" height="12" fill="#d98a07"/><ellipse cx="350" cy="268" rx="42" ry="12" fill="url(#gold)"/>
+          <ellipse cx="350" cy="266" rx="42" ry="12" fill="#c98206"/><rect x="308" y="254" width="84" height="12" fill="#d98a07"/><ellipse cx="350" cy="254" rx="42" ry="12" fill="url(#gold)"/>
+          <ellipse cx="350" cy="252" rx="42" ry="12" fill="#c98206"/><rect x="308" y="240" width="84" height="12" fill="#d98a07"/><ellipse cx="350" cy="240" rx="42" ry="12" fill="url(#gold)"/>
+          <text x="350" y="245" text-anchor="middle" font-size="15" font-weight="700" fill="#8a5a00">₹</text>
+        </g>
+        <ellipse cx="426" cy="294" rx="36" ry="10" fill="#c98206"/><rect x="390" y="284" width="72" height="10" fill="#d98a07"/><ellipse cx="426" cy="284" rx="36" ry="10" fill="url(#gold)"/>
+        <ellipse cx="426" cy="282" rx="36" ry="10" fill="#c98206"/><rect x="390" y="272" width="72" height="10" fill="#d98a07"/><ellipse cx="426" cy="272" rx="36" ry="10" fill="url(#gold)"/>
+        <text x="426" y="276" text-anchor="middle" font-size="13" font-weight="700" fill="#8a5a00">₹</text>
+      </g>
+      <rect x="30" y="298" width="440" height="6" rx="3" fill="#fff" opacity=".35"/>
+    </svg>
+    <h2>Lending made simple</h2>
+    <p>Customers, loans, repayments and collections, all in one place.</p>
+  </section>
+
+  <section class="panel">
+    <form id="loginForm" class="card">
+      <div class="logo big">₹</div>
+      <h1>My Loan Manager</h1>
+      <p class="muted">Welcome back. Sign in to continue.</p>
+      <label>Email<input type="email" name="email" required autocomplete="username"></label>
+      <label>Password<input type="password" name="password" required autocomplete="current-password"></label>
+      <div id="loginMsg" class="err"></div>
+      <button class="btn primary wide" type="submit">Log in</button>
+      <button type="button" class="link" id="forgot">Forgot password?</button>
+    </form>
+  </section>
+</div>
+
+<div id="shell" class="hidden">
+  <header class="top">
+    <strong id="brand">My Loan Manager</strong>
+    <span id="who" class="muted"></span>
+    <button id="logout" class="btn sm">Log out</button>
+  </header>
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+
+<div id="modal" class="modal hidden"><div class="box" id="modalBox"></div></div>
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
