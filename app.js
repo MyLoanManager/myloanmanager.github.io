@@ -1,6 +1,6 @@
 import {initializeApp,deleteApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged,createUserWithEmailAndPassword,sendPasswordResetEmail,reauthenticateWithCredential,EmailAuthProvider} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {getFirestore,collection,doc,getDoc,getDocs,setDoc,addDoc,updateDoc,deleteDoc,onSnapshot,query,orderBy,limit,writeBatch} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {getFirestore,collection,doc,getDoc,getDocs,setDoc,addDoc,updateDoc,deleteDoc,onSnapshot,query,orderBy,limit,writeBatch,runTransaction} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {firebaseConfig} from "./firebase-config.js";
 
 const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getFirestore(app);
@@ -12,7 +12,10 @@ const inr=n=>'₹'+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2}
 const iso=d=>new Date(d.getTime()-d.getTimezoneOffset()*6e4).toISOString().slice(0,10);
 const today=()=>iso(new Date());
 const nowISO=()=>new Date().toISOString();
-const code=id=>String(id||'').slice(0,6).toUpperCase();
+// Loan ID shown to people: the numeric loanNo (150001, 150002 …). Old loans without a number fall back to a short code.
+const code=id=>{const l=S.loans.find(x=>x.id===id);return l&&l.loanNo!=null?String(l.loanNo):String(id||'').slice(0,6).toUpperCase()};
+// Receipt number shown to people: 7 digits (0000001 …)
+const rno=p=>p&&p.receiptNo!=null?String(p.receiptNo).padStart(7,'0'):String(p?.id||'').slice(0,6).toUpperCase();
 const sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
 const toast=(m,bad)=>{const t=$('#toast');t.textContent=m;t.className=bad?'bad show':'show';setTimeout(()=>t.className='',3500)};
 const badge=s=>`<span class="badge ${esc(s)}">${esc(s)}</span>`;
@@ -31,6 +34,31 @@ const S={me:null,settings:{...DEF},customers:[],loans:[],payments:[],followups:[
 const role=()=>S.me?.role,isAdmin=()=>role()==='admin',isMgr=()=>role()==='manager';
 const canApprove=l=>isAdmin()||(isMgr()&&+l.amount<=+S.settings.approvalLimit);
 const log=(action,detail)=>addDoc(collection(db,'audit'),{at:nowISO(),uid:S.me.id,name:S.me.name,role:role(),action,detail:detail||''}).catch(()=>{});
+
+/* ---------- sequential numbers (loan IDs start at 150001, receipts at 0000001) ---------- */
+async function nextNo(field){
+  const ref=doc(db,'counters','main'),base=field==='loanNo'?150000:0;
+  return runTransaction(db,async t=>{
+    const s=await t.get(ref),cur=s.exists()&&s.data()[field]!=null?+s.data()[field]:base,n=cur+1;
+    if(s.exists())t.update(ref,{[field]:n});
+    else t.set(ref,{loanNo:field==='loanNo'?n:150000,receiptNo:field==='receiptNo'?n:0});
+    return n;
+  });
+}
+async function numberOldRecords(){
+  const ref=doc(db,'counters','main'),cs=await getDoc(ref);
+  let ln=cs.exists()&&cs.data().loanNo!=null?+cs.data().loanNo:150000,rn=cs.exists()&&cs.data().receiptNo!=null?+cs.data().receiptNo:0;
+  const ol=S.loans.filter(l=>l.loanNo==null).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
+  const op=S.payments.filter(p=>p.receiptNo==null).sort((a,b)=>(a.created||a.date||'').localeCompare(b.created||b.date||''));
+  if(!ol.length&&!op.length)return toast('All records already have numbers');
+  if(!confirm(`Give numbers to ${ol.length} older loan(s) and ${op.length} older payment(s)? Their old short codes will be replaced.`))return;
+  const ops=[...ol.map(l=>[doc(db,'loans',l.id),{loanNo:++ln}]),...op.map(p=>[doc(db,'payments',p.id),{receiptNo:++rn}])];
+  try{
+    await setDoc(ref,{loanNo:ln,receiptNo:rn});
+    for(let i=0;i<ops.length;i+=400){const b=writeBatch(db);ops.slice(i,i+400).forEach(([r,d])=>b.update(r,d));await b.commit()}
+    log('Numbered old records',`${ol.length} loans, ${op.length} payments`);toast('Old records numbered');
+  }catch(e){toast('Failed: '+e.code,true)}
+}
 
 /* ---------- loan maths ---------- */
 function addPeriod(s,i,f){const d=new Date(s+'T00:00:00');if(f==='Daily')d.setDate(d.getDate()+i);else if(f==='Weekly')d.setDate(d.getDate()+7*i);else d.setMonth(d.getMonth()+i);return iso(d)}
@@ -157,6 +185,47 @@ function periods(kind){
   else for(let i=5;i>=0;i--){const d=new Date(+td.slice(0,4),+td.slice(5,7)-1-i,1),f=iso(d);out.push({label:d.toLocaleString('en',{month:'short'})+' '+String(d.getFullYear()).slice(2),from:f,to:monthEnd(f)})}
   return out;
 }
+const fmtK=n=>{n=Math.round(n);const f=(v,s)=>v.toFixed(1).replace(/\.0$/,'')+s;return n>=1e7?f(n/1e7,'Cr'):n>=1e5?f(n/1e5,'L'):n>=1e3?f(n/1e3,'K'):String(n)};
+function pie3d(parts){
+  const total=sum(parts,p=>p.value);
+  if(total<=0)return '<p class="muted">No active loans yet.</p>';
+  const cx=160,cy=100,rx=72,ry=40,d=22,W=320,H=205;
+  const pt=(a)=>[cx+rx*Math.sin(a),cy-ry*Math.cos(a)];
+  let a0=0;
+  const segs=parts.filter(p=>p.value>0).map(p=>{const a1=a0+p.value/total*2*Math.PI,s={...p,a0,a1,pct:p.value/total*100};a0=a1;return s});
+  const walls=segs.map(s=>{
+    const a=Math.max(s.a0,Math.PI/2),b=Math.min(s.a1,3*Math.PI/2);if(a>=b)return '';
+    const [x1,y1]=pt(a),[x2,y2]=pt(b);
+    return `<path d="M${x1},${y1} A${rx},${ry} 0 0 1 ${x2},${y2} L${x2},${y2+d} A${rx},${ry} 0 0 0 ${x1},${y1+d} Z" fill="${s.dark}"/>`}).join('');
+  const tops=segs.map(s=>{
+    if(segs.length===1)return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${s.color}"/>`;
+    const [x1,y1]=pt(s.a0),[x2,y2]=pt(s.a1),large=s.a1-s.a0>Math.PI?1:0;
+    return `<path d="M${cx},${cy} L${x1},${y1} A${rx},${ry} 0 ${large} 1 ${x2},${y2} Z" fill="${s.color}" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"><title>${esc(s.name)}: ${inr(s.value)} (${s.pct.toFixed(1)}%)</title></path>`}).join('');
+  const labels=segs.map(s=>{
+    const m=(s.a0+s.a1)/2,sx=Math.sin(m),co=Math.cos(m);
+    const lx=cx+(rx+16)*sx,ly=cy-(ry+14)*co+(co<0?d:0)-(co>0.3?14:0);
+    const anchor=sx>0.3?'start':sx<-0.3?'end':'middle';
+    return `<text x="${lx}" y="${ly}" text-anchor="${anchor}" font-size="12" font-weight="700" style="fill:${s.dark}"><tspan x="${lx}">${esc(s.name)}</tspan><tspan x="${lx}" dy="14">${s.pct.toFixed(0)}%</tspan></text>`}).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Loan portfolio pie chart">
+    <defs><radialGradient id="pieShine" cx=".35" cy=".25" r=".8"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs>
+    <ellipse cx="${cx}" cy="${cy+d+6}" rx="${rx+6}" ry="${ry}" fill="#14213d" opacity=".10"/>
+    ${walls}${tops}<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="url(#pieShine)" pointer-events="none"/>${labels}</svg>`;
+}
+function lineChart(ps){
+  const W=640,H=270,L=50,R=16,T=14,B=32,cw=W-L-R,ch=H-T-B,n=ps.length,rowsN=6;
+  const maxV=Math.max(1,...ps.flatMap(p=>[p.e,p.c]));
+  const niceStep=v=>{const p=Math.pow(10,Math.floor(Math.log10(v))),f=v/p;return(f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10)*p};
+  const top=niceStep(maxV*1.05/rowsN)*rowsN;
+  const X=i=>L+cw*i/(n-1),Y=v=>T+ch-v/top*ch;
+  let lines='',ylab='';
+  for(let r=0;r<=rowsN;r++){const y=T+ch*r/rowsN;lines+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/>`;ylab+=`<text x="${L-6}" y="${y+4}" text-anchor="end" font-size="10">${fmtK(top*(rowsN-r)/rowsN)}</text>`}
+  for(let i=0;i<n;i++)lines+=`<line x1="${X(i)}" x2="${X(i)}" y1="${T}" y2="${T+ch}"/>`;
+  const series=(k,color,name)=>`<polyline fill="none" stroke="${color}" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round" points="${ps.map((p,i)=>X(i)+','+Y(p[k])).join(' ')}"/>`+
+    ps.map((p,i)=>`<circle cx="${X(i)}" cy="${Y(p[k])}" r="5.5" fill="${color}"><title>${esc(p.label)}: ${name} ${inr(p[k])}</title></circle>`).join('');
+  const xlab=ps.map((p,i)=>`<text x="${X(i)}" y="${H-10}" text-anchor="middle" font-size="10">${esc(p.label)}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Collected versus due line chart"><g class="gl" stroke="#a9adb5" stroke-width="1.5">${lines}</g>${ylab}${series('e','#f26a10','due')}${series('c','#3b94d9','collected')}${xlab}</svg>
+    <div class="legend"><span><i class="lo"></i>Due</span><span><i class="lb"></i>Collected</span><span>Top of chart: ₹${fmtK(top)}</span></div>`;
+}
 function renderProgress(el,live){
   const td=today(),rows=live.flatMap(x=>x.m.rows);
   const expected=(f,t)=>sum(rows.filter(r=>r.due>=f&&r.due<=t),r=>r.emi);
@@ -165,18 +234,19 @@ function renderProgress(el,live){
   const bars=items.map(([n,f,t])=>{
     const e=expected(f,t),c=collected(f,t),pc=e?Math.round(c/e*100):(c>0?100:0);
     return `<div class="pb"><div class="pbt"><b>${n}</b><span>${inr(c)} collected of ${inr(e)} due · ${pc}%</span></div><div class="pbar"><i class="${pc>=100?'full':pc>=60?'mid':'low'}" style="width:${Math.min(pc,100)}%"></i></div></div>`}).join('');
+  const tot=sum(live,x=>x.m.total),col=sum(live,x=>Math.min(x.m.paid,x.m.total)),od=sum(live,x=>Math.min(x.m.overdue,x.m.outstanding));
+  const pie=pie3d([
+    {name:'Collected',value:col,color:'#fb9a4b',dark:'#c4651a'},
+    {name:'Upcoming',value:Math.max(0,tot-col-od),color:'#4bacc6',dark:'#2c7d94'},
+    {name:'Overdue',value:od,color:'#8064a2',dark:'#5a4478'}]);
   el.innerHTML=`<div class="card"><h3 style="margin-top:0">Collection progress</h3>${bars}
     <p class="muted">Progress = money collected in the period ÷ installments scheduled to fall due in it. Payments of older overdue amounts also count, so it can go above 100%.</p></div>
-    <div class="card" style="margin:14px 0"><div class="row" style="margin-top:0"><h3 style="margin:0;flex:1">Collected vs due</h3>
-    ${[['daily','Daily (14 days)'],['weekly','Weekly (8 weeks)'],['monthly','Monthly (6 months)']].map(([k,t])=>`<button class="btn sm ${chartKind===k?'on':''}" data-k="${k}">${t}</button>`).join('')}</div><div id="chart"></div></div>`;
-  const draw=()=>{
-    const ps=periods(chartKind).map(p=>({...p,e:expected(p.from,p.to),c:collected(p.from,p.to)}));
-    const max=Math.max(1,...ps.flatMap(p=>[p.e,p.c])),W=640,H=230,L=8,B=34,T=12,ch=H-B-T,gw=(W-L*2)/ps.length,bw=Math.min(22,gw*.36);
-    const g=ps.map((p,i)=>{const x=L+i*gw+gw/2,he=p.e/max*ch,hc=p.c/max*ch;
-      return `<g><title>${esc(p.label)}: collected ${inr(p.c)}, due ${inr(p.e)}</title><rect class="bd" x="${x-bw-1}" y="${T+ch-he}" width="${bw}" height="${he}" rx="3"/><rect class="bc" x="${x+1}" y="${T+ch-hc}" width="${bw}" height="${hc}" rx="3"/><text x="${x}" y="${H-14}" text-anchor="middle" font-size="10">${esc(p.label)}</text></g>`}).join('');
-    $('#chart',el).innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Collected versus due bar chart"><line x1="${L}" x2="${W-L}" y1="${T+ch}" y2="${T+ch}" stroke="#c9d0de"/>${g}</svg>
-      <div class="legend"><span><i class="bd"></i>Due</span><span><i class="bc"></i>Collected</span><span>Tallest bar: ${inr(max)}</span></div>`;
-  };
+    <div class="dashrow">
+      <div class="card"><h3 style="margin-top:0">Loan portfolio</h3><div id="pie">${pie}</div><p class="muted" style="margin-bottom:0">Share of the total payable on approved and active loans.</p></div>
+      <div class="card"><div class="row" style="margin-top:0"><h3 style="margin:0;flex:1">Statistics: collected vs due</h3>
+      ${[['daily','Daily'],['weekly','Weekly'],['monthly','Monthly']].map(([k,t])=>`<button class="btn sm ${chartKind===k?'on':''}" data-k="${k}">${t}</button>`).join('')}</div><div id="chart"></div></div>
+    </div>`;
+  const draw=()=>{$('#chart',el).innerHTML=lineChart(periods(chartKind).map(p=>({...p,e:expected(p.from,p.to),c:collected(p.from,p.to)})))};
   $$('[data-k]',el).forEach(b=>b.onclick=()=>{chartKind=b.dataset.k;$$('[data-k]',el).forEach(x=>x.classList.toggle('on',x.dataset.k===chartKind));draw()});
   draw();
 }
@@ -293,7 +363,7 @@ pages.loans=el=>{
   el.innerHTML=`<h2>Loans</h2><button class="btn primary" id="addL">+ New loan</button><div id="t"></div>`;
   $('#addL').onclick=()=>loanForm();
   mount($('#t'),'loans',[
-    {key:'code',label:'Loan',val:l=>code(l.id)},{key:'customerName',label:'Customer'},{key:'loanType',label:'Type'},
+    {key:'code',label:'Loan ID',val:l=>code(l.id)},{key:'customerName',label:'Customer'},{key:'loanType',label:'Type'},
     {key:'amount',label:'Amount',val:l=>+l.amount,html:l=>inr(l.amount)},{key:'rate',label:'Rate %/yr',val:l=>+l.rate},
     {key:'frequency',label:'Frequency'},{key:'emi',label:'Installment',val:l=>calc(l).emi,html:l=>inr(calc(l).emi)},
     {key:'status',label:'Status',html:l=>badge(l.status)},{key:'out',label:'Outstanding',val:l=>metrics(l).outstanding,html:l=>inr(metrics(l).outstanding)},
@@ -328,7 +398,7 @@ function loanForm(id,custId){
   f.onsubmit=async e=>{e.preventDefault();const d=read(),c=S.customers.find(x=>x.id===d.customerId);
     const data={customerId:d.customerId,customerName:c.name,customerPhone:c.phone,loanType:d.loanType,interestType:d.interestType,frequency:d.frequency,amount:+d.amount,rate:+d.rate,installments:+d.installments,startDate:d.startDate,processingFee:+d.processingFee||0,collateral:d.collateral||'',notes:d.notes||''};
     try{if(id){await updateDoc(doc(db,'loans',id),data);log('Edited loan',code(id))}
-      else{const r=await addDoc(collection(db,'loans'),{...data,status:'Pending',created:nowISO(),createdBy:S.me.id,createdByName:S.me.name});log('Created loan application',code(r.id)+' '+c.name+' '+inr(data.amount))}
+      else{const no=await nextNo('loanNo');await addDoc(collection(db,'loans'),{...data,loanNo:no,status:'Pending',created:nowISO(),createdBy:S.me.id,createdByName:S.me.name});log('Created loan application',no+' '+c.name+' '+inr(data.amount))}
       closeModal();toast(id?'Loan saved':canApprove(data)?'Application saved — you can approve it':'Application saved — waiting for approval'+(data.amount>st.approvalLimit?' by Admin':''))}
     catch(err){toast('Save failed: '+err.code,true)}};
 }
@@ -377,24 +447,36 @@ function payForm(loanId){
   f.loanId.onchange=()=>{f.amount.value='';info()};info();$('#cx').onclick=closeModal;
   f.onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(f)),l=S.loans.find(x=>x.id===d.loanId),m=metrics(l),amt=+d.amount;
     if(amt>m.outstanding+0.5&&!confirm(`Amount is more than the outstanding ${inr(m.outstanding)}. Save anyway?`))return;
-    try{const r=await addDoc(collection(db,'payments'),{loanId:l.id,customerId:l.customerId,customerName:l.customerName,amount:amt,date:d.date,mode:d.mode,note:d.note||'',receivedBy:S.me.id,receivedByName:S.me.name,created:nowISO()});
+    try{const rcNo=await nextNo('receiptNo');
+      const pd={loanId:l.id,customerId:l.customerId,customerName:l.customerName,amount:amt,date:d.date,mode:d.mode,note:d.note||'',receivedBy:S.me.id,receivedByName:S.me.name,created:nowISO(),receiptNo:rcNo};
+      const r=await addDoc(collection(db,'payments'),pd);
       log('Recorded payment',`${inr(amt)} for loan ${code(l.id)} (${l.customerName})`);
       const left=m.outstanding-amt,ns=left<=0.5?'Closed':'Active';
       if(ns!==l.status)await updateDoc(doc(db,'loans',l.id),{status:ns}).catch(()=>{});
-      closeModal();toast('Payment saved');if(confirm('Print receipt?'))setTimeout(()=>receipt(r.id),400)}
+      closeModal();toast('Payment saved');if(confirm('Print receipt?'))setTimeout(()=>receipt(r.id,{id:r.id,...pd}),400)}
     catch(err){toast('Save failed: '+err.code,true)}};
 }
-function receipt(pid){
-  const p=S.payments.find(x=>x.id===pid)||{},l=S.loans.find(x=>x.id===p.loanId);if(!l)return toast('Receipt data is still loading, try again',true);const m=metrics(l);
-  printHTML('Receipt',`<h2>${esc(S.settings.businessName)}</h2><h3>Payment receipt #${code(pid)}</h3><table>
-    <tr><td>Date</td><td>${esc(p.date)}</td></tr><tr><td>Customer</td><td>${esc(p.customerName)}</td></tr><tr><td>Loan</td><td>${code(l.id)}</td></tr>
-    <tr><td>Amount received</td><td><b>${inr(p.amount)}</b></td></tr><tr><td>Mode</td><td>${esc(p.mode)}</td></tr><tr><td>Received by</td><td>${esc(p.receivedByName)}</td></tr>
-    <tr><td>Outstanding balance</td><td>${inr(m.outstanding)}</td></tr></table><p style="margin-top:40px">Signature: ____________________</p>`);
+function receipt(pid,given){
+  const p=given||S.payments.find(x=>x.id===pid),l=p&&S.loans.find(x=>x.id===p.loanId);
+  if(!p||!l)return toast('Receipt data is still loading, try again',true);
+  const m=metrics(l);
+  // balance as it stood right after this payment (ignores payments recorded later)
+  const all=S.payments.filter(q=>q.loanId===l.id&&q.id!==p.id).concat([p]);
+  const upTo=p.created?all.filter(q=>(q.created||'')<=p.created):all;
+  const balance=Math.max(0,m.total-sum(upTo,q=>q.amount));
+  const line=(k,v)=>`<div class="ln"><span>${k}</span> ${v}</div>`;
+  printHTML('Receipt '+rno(p),`<style>.rc{max-width:460px;line-height:1.9;font-size:17px}.rc h2{margin:0 0 6px}.ln{margin:2px 0}</style><div class="rc">
+    <h2>${esc(S.settings.businessName)}</h2>
+    <div><b>Payment receipt #${rno(p)}</b></div>
+    ${line('Date',esc(p.date))}${line('Customer',esc(p.customerName))}${line('Loan id',esc(code(l.id)))}
+    ${line('Amount received',inr(p.amount))}${line('Mode',esc(p.mode))}${line('Received by',esc(p.receivedByName))}
+    ${line('Outstanding balance',inr(balance))}
+    <p style="margin-top:44px">Signature: ____________________</p></div>`);
 }
 pages.payments=el=>{
   el.innerHTML=`<h2>Payments</h2><button class="btn primary" id="addP">+ Record payment</button><div id="t"></div>`;
   $('#addP').onclick=()=>payForm();
-  mount($('#t'),'pays',[{key:'date',label:'Date'},{key:'customerName',label:'Customer'},{key:'loan',label:'Loan',val:p=>code(p.loanId)},
+  mount($('#t'),'pays',[{key:'date',label:'Date'},{key:'customerName',label:'Customer'},{key:'loan',label:'Loan ID',val:p=>code(p.loanId)},{key:'receipt',label:'Receipt no',val:p=>rno(p)},
     {key:'amount',label:'Amount',val:p=>+p.amount,html:p=>inr(p.amount)},{key:'mode',label:'Mode'},{key:'receivedByName',label:'Received by'},{key:'note',label:'Note'}],S.payments,
     {sort:'date',dir:'desc',filter:{label:'modes',options:S.settings.paymentModes,get:p=>p.mode},
      actions:p=>btn('rc',p.id,'Receipt')+(isAdmin()?btn('edit',p.id,'Edit')+btn('del',p.id,'Delete','danger'):''),
@@ -461,7 +543,7 @@ pages.data=el=>{
     <div class="row"><button class="btn" id="tpl">Download template</button><input type="file" id="imp" accept=".xlsx,.xls,.csv" style="max-width:320px"></div><div id="prev"></div></div>`:''}`;
   const C=()=>S.customers.map(c=>({Name:c.name,Phone:c.phone,CustomerType:c.customerType,IDType:c.idType,IDNumber:c.idNumber,Address:c.address,MapsLink:c.mapsLink,Latitude:c.lat,Longitude:c.lng,GuarantorName:c.guarantorName,GuarantorPhone:c.guarantorPhone,Notes:c.notes,Added:(c.created||'').slice(0,10)}));
   const L=()=>S.loans.map(l=>{const m=metrics(l);return{Loan:code(l.id),Customer:l.customerName,Type:l.loanType,InterestType:l.interestType,Frequency:l.frequency,Amount:l.amount,RatePerYear:l.rate,Installments:l.installments,Installment:Math.round(m.emi*100)/100,StartDate:l.startDate,Status:l.status,Paid:m.paid,Outstanding:m.outstanding,CreatedBy:l.createdByName}});
-  const P=()=>S.payments.map(p=>({Date:p.date,Customer:p.customerName,Loan:code(p.loanId),Amount:p.amount,Mode:p.mode,ReceivedBy:p.receivedByName,Note:p.note}));
+  const P=()=>S.payments.map(p=>({Receipt:rno(p),Date:p.date,Customer:p.customerName,LoanID:code(p.loanId),Amount:p.amount,Mode:p.mode,ReceivedBy:p.receivedByName,Note:p.note}));
   $('#e1').onclick=()=>{xlsxSave(`customers-${today()}.xlsx`,{Customers:C()});log('Exported customers')};
   $('#e2').onclick=()=>{xlsxSave(`loans-${today()}.xlsx`,{Loans:L()});log('Exported loans')};
   $('#e3').onclick=()=>{xlsxSave(`payments-${today()}.xlsx`,{Payments:P()});log('Exported payments')};
@@ -514,7 +596,11 @@ pages.settings=el=>{
     <label>Loan types (one per line, optional default rate: Name=rate)<textarea name="loanTypes" rows="5">${esc(st.loanTypes.map(t=>t.rate!=null?`${t.name}=${t.rate}`:t.name).join('\n'))}</textarea></label>
     <label>Payment modes (one per line)<textarea name="paymentModes" rows="4">${esc(st.paymentModes.join('\n'))}</textarea></label>
     <label>ID proof types (one per line)<textarea name="idTypes" rows="4">${esc(st.idTypes.join('\n'))}</textarea></label></div>
-    <button class="btn primary">Save settings</button></form>`;
+    <button class="btn primary">Save settings</button></form>
+    <div class="card" style="margin-top:14px"><h3 style="margin-top:0">Loan ID and receipt numbering</h3>
+    <p class="muted">New loans get IDs 150001, 150002 … and new receipts get 0000001, 0000002 … automatically. Loans and payments saved before this feature still show short codes: click below to give them numbers in the order they were created.</p>
+    <button class="btn" id="renum" type="button">Number old records</button></div>`;
+  $('#renum').onclick=numberOldRecords;
   const lines=v=>String(v).split('\n').map(x=>x.trim()).filter(Boolean);
   $('#f').onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));
     const data={businessName:d.businessName||'Loan Manager',approvalLimit:+d.approvalLimit||0,lateFee:+d.lateFee||0,customerTypes:lines(d.customerTypes),paymentModes:lines(d.paymentModes),idTypes:lines(d.idTypes),
